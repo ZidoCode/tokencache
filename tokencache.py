@@ -527,9 +527,16 @@ class Proxy(BaseHTTPRequestHandler):
         raw = resp.read()
         ctype = (resp.headers.get("Content-Type") or "").lower()
         resp.close()
-        # Some upstreams stream even when stream=false was requested.
-        if "event-stream" in ctype or raw.lstrip().startswith(b"data:"):
-            body = raw.decode("utf-8", "replace")
+        # Some upstreams stream even when stream=false was requested; others
+        # lie about the content-type (text/event-stream with a plain JSON
+        # body, sometimes with stray whitespace/HTML noise prepended).
+        # Trust the body: find the first real JSON/SSE payload.
+        ls = raw.lstrip()
+        cut = min((i for i in (ls.find(b"{"), ls.find(b"["),
+                               ls.find(b"data:")) if i != -1), default=-1)
+        payload = ls[cut:] if cut > 0 else ls
+        if payload.startswith(b"data:"):
+            body = payload.decode("utf-8", "replace")
             text, usage, m = parse_sse(body)
             if text:
                 self._store_from_text(key, fp, m or model, text, usage)
@@ -543,10 +550,17 @@ class Proxy(BaseHTTPRequestHandler):
                                   extra={"X-Tokencache": "MISS-STREAMED"})
             return self._send(200, raw)
         self.store.bump("misses")
+        # some gateways prepend stray whitespace/HTML noise before the JSON
+        # body; find the first "{" or "[" and parse from there
         try:
-            obj = json.loads(raw)
+            obj = json.loads(payload)
         except Exception:
-            return self._send(200, raw)
+            # some gateways append an SSE tail ("data: [DONE]") after the
+            # JSON body — decode the first JSON value and ignore the rest
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(payload.decode("utf-8", "replace").lstrip())
+            except Exception:
+                return self._send(200, raw)
         self._store_from_obj(key, fp, model, obj)
         self._send(200, raw, extra={"X-Tokencache": "MISS"})
 
