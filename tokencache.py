@@ -18,6 +18,7 @@ Then:  export OPENAI_BASE_URL=http://127.0.0.1:20129/v1
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -682,7 +683,15 @@ def build_server(cfg):
         "store": store, "upstream": cfg.upstream, "cfg": cfg,
         "inflight": {}, "inflight_lock": threading.Lock(),
     })
-    httpd = ThreadingHTTPServer((cfg.host, cfg.port), handler)
+    try:
+        httpd = ThreadingHTTPServer((cfg.host, cfg.port), handler)
+    except OSError as exc:
+        if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+            raise SystemExit(
+                f"tokencache: cannot bind {cfg.host}:{cfg.port} ({exc.strerror}). "
+                f"Something else is already using that port — pass --port N."
+            ) from None
+        raise
     httpd.daemon_threads = True
     httpd.store = store
     return httpd
