@@ -291,8 +291,41 @@ class Proxy(BaseHTTPRequestHandler):
 
     # ---- helpers ---------------------------------------------------------
     def _body(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        return self.rfile.read(n) if n else b""
+        """Read the request body, chunked or length-delimited.
+
+        Clients that stream a completion send Transfer-Encoding: chunked and no
+        Content-Length; reading only Content-Length silently forwarded an empty
+        body upstream.
+        """
+        encoding = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in encoding:
+            return self._read_chunked()
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return b""
+        return self.rfile.read(n) if n > 0 else b""
+
+    def _read_chunked(self) -> bytes:
+        chunks: list[bytes] = []
+        while True:
+            line = self.rfile.readline(65537)
+            if not line:
+                break
+            size_field = line.split(b";")[0].strip()
+            try:
+                size = int(size_field, 16)
+            except ValueError:
+                break
+            if size == 0:
+                while True:  # consume trailers
+                    trailer = self.rfile.readline(65537)
+                    if trailer in (b"\r\n", b"\n", b""):
+                        break
+                break
+            chunks.append(self.rfile.read(size))
+            self.rfile.read(2)  # trailing CRLF
+        return b"".join(chunks)
 
     def _send(self, code, payload: bytes, ctype="application/json", extra=None):
         self.send_response(code)
